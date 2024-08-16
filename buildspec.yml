@@ -3,19 +3,45 @@ phases:
   pre_build:
     commands:
       - echo "Logging in to Amazon ECR..."
+      - aws --version
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_URI=$ECR_REPO_NAME.dkr.ecr.$ECR_REGION.amazonaws.com/$IMAGE_NAME
+      - IMAGE_TAG=$(git describe --tags --always)
+      # - export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain pn2-share-service --domain-owner $ECR_REPO_NAME --region $ECR_REGION --query authorizationToken --output text`
   build:
+    on-failure: ABORT
     commands:
       - echo Build started on `date`
       - echo Building the Docker image...
-      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
-      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG    
+      # - env | grep -E '^([^=]+)=(.*)$' | sed -E 's/([^=]+)=(.*)/"\1":"\2"/' | tr '\n' ',' | sed 's/,$//' | sed 's/^/{ /; s/$/ }/' > env.json
+      - docker build -t $REPOSITORY_URI:latest -t $REPOSITORY_URI:$IMAGE_TAG .
+      - echo Build completed on `date`
+      - echo Pushing the Docker images...
+      - docker push $REPOSITORY_URI --all-tags
   post_build:
     commands:
-      - echo Build completed on `date`
-      - echo Pushing the Docker image...
-      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
-      - printf '[{"name":"%s","imageUri":"%s"}]' $CONTAINER_NAME $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG > imagedefinition.json
-      - cat imagedefinition.json
-artifacts:
-  files: imagedefinition.json
+      - |
+        echo Get current task definition info
+        export TASK_DEFINITION=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query "services[0].taskDefinition" --output text)
+        export TASK_DEFINITION_DETAILS=$(aws ecs describe-task-definition --task-definition $TASK_DEFINITION)
+        export CURRENT_IMAGE=$(echo "$TASK_DEFINITION_DETAILS" | jq -r '.taskDefinition.containerDefinitions[0].image')
+        export CONTAINER_NAME=$(echo "$TASK_DEFINITION_DETAILS" | jq -r '.taskDefinition.containerDefinitions[0].name')
+        export CONTAINER_PORT=$(echo "$TASK_DEFINITION_DETAILS" | jq -r '.taskDefinition.containerDefinitions[0].portMappings[0].containerPort')
+        export CURRENT_TAG=$(cut -d':' -f2 <<< "$CURRENT_IMAGE")
+        if ! [[ "$IMAGE_TAG" =~ ^v[0-9]{1,}.[0-9]{1,}.[0-9]{1,}(-rc.[0-9]{1,})?$ ]]; then
+          IMAGE_TAG=latest
+        fi
+        export CD_APP_NAME=AppECS-$ECS_CLUSTER-$ECS_SERVICE
+        export CD_DGP_NAME=DgpECS-$ECS_CLUSTER-$ECS_SERVICE
+        if [ "$IMAGE_TAG" != "$CURRENT_TAG" ]; then
+          echo Register the updated task definition
+          export NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION_DETAILS | jq --arg image "$REPOSITORY_URI:$IMAGE_TAG" '.taskDefinition | .containerDefinitions[0].image=$image | del(.taskDefinitionArn) | del(.revision) | del(.status) | del(.requiresAttributes) | del(.compatibilities) | del(.registeredAt) | del(.registeredBy)')
+          export NEW_TASK_DEFINITION_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEFINITION" --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo Deploy the ECS service with the new task definition
+          printf "$(cat appspec.yaml)" $NEW_TASK_DEFINITION_ARN $CONTAINER_NAME $CONTAINER_PORT > appspec.yaml
+          aws deploy create-deployment --application-name $CD_APP_NAME --deployment-group-name $CD_DGP_NAME --revision revisionType=AppSpecContent,appSpecContent={content="$(cat appspec.yaml)"}
+        else
+          printf "$(cat appspec.yaml)" $TASK_DEFINITION $CONTAINER_NAME $CONTAINER_PORT > appspec.yaml
+          aws deploy create-deployment --application-name $CD_APP_NAME --deployment-group-name $CD_DGP_NAME --deployment-config-name CodeDeployDefault.ECSAllAtOnce --revision revisionType=AppSpecContent,appSpecContent={content="$(cat appspec.yaml)"}
+        fi
+
