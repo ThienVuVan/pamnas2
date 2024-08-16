@@ -1,0 +1,10 @@
+version: '3.6'
+services:
+  app:
+    image: 753387216052.dkr.ecr.us-east-1.amazonaws.com/dev-pamnas2-ecr:latest
+    container_name: spring-app
+    restart: always
+    ports:
+      - '8080:80'
+    env_file:
+      - application.env
