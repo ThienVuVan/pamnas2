@@ -7,6 +7,7 @@ phases:
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
       - REPOSITORY_URI=$ECR_REPO_NAME.dkr.ecr.$ECR_REGION.amazonaws.com/$IMAGE_NAME
       - IMAGE_TAG=$(git describe --tags --always)
+      - echo $IMAGE_TAG
       # - export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain pn2-share-service --domain-owner $ECR_REPO_NAME --region $ECR_REGION --query authorizationToken --output text`
   build:
     on-failure: ABORT
